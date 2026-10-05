@@ -20,46 +20,71 @@
 </div>
 <div id="status"></div>
 <script>
-// Base: brokeren bak Funnel. GitHub Pages → broker via /godkjenn/api (CORS kun fra denne origin).
+// Brokeren bak Funnel. CORS slipper kun denne origin til.
 const API = 'https://ez-fasting-lab.tail9e93c7.ts.net/godkjenn/api';
 const p = new URLSearchParams(location.search);
 const fid = p.get('id');
 const vis = location.hash.slice(1);     // visningsnøkkel i #fragment — når aldri serverloggen
 const b64u = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 const fromB64u = s => Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')), c=>c.charCodeAt(0));
-let F = null;
+let F = null, CHALLENGE = null;
+
+// Kanonisk JSON som MÅ matche core/godkjenning.py _kanon: sorterte nøkler, NFC, ingen flyttall,
+// separatorer ',' ':'. (Divergens → signaturen feiler på serveren = fail-closed.)
+function kanon(v){
+  if (typeof v === 'number'){ if (!Number.isInteger(v)) throw 'flyttall'; return String(v); }
+  if (typeof v === 'string') return JSON.stringify(v.normalize('NFC'));
+  if (v === true || v === false || v === null) return JSON.stringify(v);
+  if (Array.isArray(v)) return '[' + v.map(kanon).join(',') + ']';
+  const ks = Object.keys(v).sort();
+  return '{' + ks.map(k => JSON.stringify(k.normalize('NFC')) + ':' + kanon(v[k])).join(',') + '}';
+}
+async function sha256b64u(str){
+  const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return b64u(h);
+}
+async function sha256hex(str){
+  const h = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str)));
+  return Array.from(h).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+// Forhåndsvisning bygd av SIDEN fra argumentene — det du ser er det du signerer.
+const KONTROLL = /[\u0000-\u0008\u000b-\u001f\u007f‪-‮‎‏]/g;
+function ren(s){ return String(s==null?'':s).replace(KONTROLL, ''); }
+function preview(kap, a){
+  if ((kap === 'signal.send' || kap === 'sms.send') && a.til != null)
+    return ren(`Melding til ${a.til}:\n${a.tekst ?? a.melding ?? ''}`);
+  if (kap === 'gmail.send')
+    return ren(`E-post til ${a.til ?? a.to ?? '?'}\nEmne: ${a.emne ?? a.subject ?? ''}\n\n${a.tekst ?? a.body ?? ''}`);
+  return ren(Object.keys(a).sort().map(k => `${k}: ${a[k]}`).join('\n'));
+}
+function esc(s){ const d=document.createElement('div'); d.textContent = s==null?'':String(s); return d.innerHTML; }
 
 async function last(){
   try {
     const r = await fetch(`${API}/${encodeURIComponent(fid)}`, { headers: { 'X-Vis': vis } });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     F = await r.json();
+    const args_sha256 = await sha256hex(kanon(F.args));
+    const kjerne = { v: 1, type: 'exec', rp: F.rp, id: F.id, kap: F.kap,
+                     args_sha256: args_sha256, niva: F.niva, utloep: F.utloep, nonce: F.nonce };
+    CHALLENGE = await sha256b64u(kanon(kjerne));        // regnet lokalt, ikke stolt på serveren
     document.getElementById('kort').innerHTML =
       `<div class="felt"><b>Handling</b> ${esc(F.kap)}</div>` +
       `<div class="felt"><b>Nivå</b> ${esc(F.niva)}</div>` +
-      `<div class="felt"><b>Detaljer</b><div class="verdi">${esc(F.preview)}</div></div>` +
+      `<div class="felt"><b>Detaljer</b><div class="verdi">${esc(preview(F.kap, F.args))}</div></div>` +
       `<div class="felt"><b>Utløper</b> ${esc(F.utloep)}</div>`;
     document.getElementById('knapper').hidden = false;
   } catch (e) { document.getElementById('kort').textContent = 'Kunne ikke laste forespørselen: ' + e; }
 }
-function esc(s){ const d=document.createElement('div'); d.textContent = s==null?'':String(s); return d.innerHTML; }
 
 document.getElementById('godkjenn').onclick = async () => {
   const st = document.getElementById('status'); st.textContent = 'Venter på Face ID …';
   try {
     const assertion = await navigator.credentials.get({ publicKey: {
-      challenge: fromB64u(F.challenge),
-      rpId: location.hostname,
-      userVerification: 'required',
-      timeout: 120000,
-    }});
+      challenge: fromB64u(CHALLENGE), rpId: location.hostname, userVerification: 'required', timeout: 120000 }});
     const r = assertion.response;
-    const body = {
-      forespor: fid,
-      clientDataJSON: b64u(r.clientDataJSON),
-      authenticatorData: b64u(r.authenticatorData),
-      signature: b64u(r.signature),
-    };
+    const body = { forespor: fid, clientDataJSON: b64u(r.clientDataJSON),
+                   authenticatorData: b64u(r.authenticatorData), signature: b64u(r.signature) };
     const resp = await fetch(`${API}/${encodeURIComponent(fid)}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Vis': vis }, body: JSON.stringify(body) });
     st.textContent = resp.ok ? '✅ Godkjent. Nora utfører og svarer deg.' : '❌ Avvist: HTTP ' + resp.status;
