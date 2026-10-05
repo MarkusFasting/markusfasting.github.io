@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="no">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nora — registrer passkey</title>
+<style>
+  body { font: 16px/1.5 -apple-system, system-ui, sans-serif; max-width: 34rem; margin: 2rem auto; padding: 0 1rem; }
+  button { font-size: 1.1rem; padding: .7rem 1.2rem; border-radius: .6rem; border: 0; background: #1457ff; color: #fff; }
+  pre { background: #f4f4f6; padding: 1rem; border-radius: .6rem; white-space: pre-wrap; word-break: break-all; }
+  .nb { color: #a40; }
+</style>
+<h1>Registrer en passkey for Nora</h1>
+<p>Denne siden kjører på <code>markusfasting.github.io</code> (RP ID). Den lager en passkey på iPhonen/Macen
+din. <strong>Privatnøkkelen forlater aldri enheten.</strong> Etterpå limer du JSON-linja nederst inn i
+<code>deploy/godkjennere.json</code> i nora-core og committer den.</p>
+<p><label>Navn på nøkkelen: <input id="navn" value="markus-iphone"></label></p>
+<button id="reg">Lag passkey</button>
+<pre id="ut" hidden></pre>
+<script>
+const b64u = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+
+// Minimal COSE_Key-leser: henter EC2 x (-2) og y (-3) fra attestedCredentialData i authData.
+function hentXY(authData){
+  const dv = new DataView(authData.buffer, authData.byteOffset, authData.byteLength);
+  let o = 37;                                   // rpIdHash(32)+flags(1)+signCount(4)
+  o += 16;                                       // AAGUID
+  const credLen = dv.getUint16(o); o += 2 + credLen;  // credentialId
+  // Resten er COSE_Key (CBOR map). Vi parser bare det vi trenger.
+  const bytes = authData.slice(o);
+  // enkel CBOR: forventer map (0xA_). Les par til vi har -2 og -3.
+  let i = 0; const B = bytes;
+  function intval(){ // les ett CBOR-heltall (major 0/1) eller negativ nøkkel
+    const ib = B[i++]; const mt = ib >> 5, ai = ib & 31;
+    let v;
+    if (ai < 24) v = ai; else if (ai === 24) v = B[i++]; else if (ai === 25){ v = (B[i]<<8)|B[i+1]; i+=2; }
+    else throw 'cbor';
+    return mt === 1 ? -1 - v : v;
+  }
+  function bstr(){ const ib = B[i++]; const ai = ib & 31; let n; if (ai<24) n=ai; else if (ai===24) n=B[i++]; else {n=(B[i]<<8)|B[i+1]; i+=2;} const s=B.slice(i,i+n); i+=n; return s; }
+  const first = B[i++]; const n = first & 31;     // antall par i mappen
+  let x, y;
+  for (let p = 0; p < n; p++){
+    const key = intval();
+    if (key === 1 || key === 3){ intval(); }      // kty / alg → heltall
+    else if (key === -1){ intval(); }             // crv → heltall
+    else if (key === -2){ x = bstr(); }
+    else if (key === -3){ y = bstr(); }
+    else { // ukjent: prøv bstr, fall tilbake
+      try { bstr(); } catch(e){ intval(); }
+    }
+  }
+  const hex = u => Array.from(u).map(b=>b.toString(16).padStart(2,'0')).join('');
+  return { x: hex(x), y: hex(y) };
+}
+
+document.getElementById('reg').onclick = async () => {
+  const navn = document.getElementById('navn').value.trim() || 'passkey';
+  const ut = document.getElementById('ut'); ut.hidden = false; ut.textContent = 'Lager passkey …';
+  try {
+    const cred = await navigator.credentials.create({ publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rp: { id: location.hostname, name: 'Nora' },
+      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: navn, displayName: navn },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }],   // ES256
+      authenticatorSelection: { userVerification: 'required', residentKey: 'required' },
+      timeout: 120000,
+    }});
+    const authData = new Uint8Array(cred.response.getAuthenticatorData());
+    const { x, y } = hentXY(authData);
+    const linje = { navn, credId: b64u(cred.rawId), x, y };
+    ut.textContent = 'Lim inn dette objektet i "noekler"-lista i deploy/godkjennere.json, og commit:\n\n'
+      + JSON.stringify(linje, null, 2);
+  } catch (e) {
+    ut.textContent = 'Feil: ' + e + '\n\nPrøv i Safari/Chrome på en enhet med Face ID / Touch ID.';
+  }
+};
+</script>
+</html>

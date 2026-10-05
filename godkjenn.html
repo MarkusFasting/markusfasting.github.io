@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="no">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nora — godkjenn</title>
+<style>
+  body { font: 16px/1.6 -apple-system, system-ui, sans-serif; max-width: 34rem; margin: 2rem auto; padding: 0 1rem; }
+  .kort { border: 1px solid #ddd; border-radius: .8rem; padding: 1rem 1.2rem; }
+  .felt { margin: .4rem 0; } .felt b { display: inline-block; min-width: 7rem; color: #555; }
+  .verdi { white-space: pre-wrap; word-break: break-word; }
+  button { font-size: 1.1rem; padding: .8rem 1.4rem; border-radius: .6rem; border: 0; margin-top: 1rem; }
+  .ja { background: #0a7d32; color: #fff; } .nei { background: #eee; }
+  #status { margin-top: 1rem; font-weight: 600; }
+</style>
+<h1>Godkjenn handling</h1>
+<div id="kort" class="kort">Laster …</div>
+<div id="knapper" hidden>
+  <button class="ja" id="godkjenn">Godkjenn med Face ID</button>
+  <button class="nei" id="avvis">Avvis</button>
+</div>
+<div id="status"></div>
+<script>
+// Base: brokeren bak Funnel. GitHub Pages → broker via /godkjenn/api (CORS kun fra denne origin).
+const API = 'https://ez-fasting-lab.tail9e93c7.ts.net/godkjenn/api';
+const p = new URLSearchParams(location.search);
+const fid = p.get('id');
+const vis = location.hash.slice(1);     // visningsnøkkel i #fragment — når aldri serverloggen
+const b64u = b => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+const fromB64u = s => Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')), c=>c.charCodeAt(0));
+let F = null;
+
+async function last(){
+  try {
+    const r = await fetch(`${API}/${encodeURIComponent(fid)}`, { headers: { 'X-Vis': vis } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    F = await r.json();
+    document.getElementById('kort').innerHTML =
+      `<div class="felt"><b>Handling</b> ${esc(F.kap)}</div>` +
+      `<div class="felt"><b>Nivå</b> ${esc(F.niva)}</div>` +
+      `<div class="felt"><b>Detaljer</b><div class="verdi">${esc(F.preview)}</div></div>` +
+      `<div class="felt"><b>Utløper</b> ${esc(F.utloep)}</div>`;
+    document.getElementById('knapper').hidden = false;
+  } catch (e) { document.getElementById('kort').textContent = 'Kunne ikke laste forespørselen: ' + e; }
+}
+function esc(s){ const d=document.createElement('div'); d.textContent = s==null?'':String(s); return d.innerHTML; }
+
+document.getElementById('godkjenn').onclick = async () => {
+  const st = document.getElementById('status'); st.textContent = 'Venter på Face ID …';
+  try {
+    const assertion = await navigator.credentials.get({ publicKey: {
+      challenge: fromB64u(F.challenge),
+      rpId: location.hostname,
+      userVerification: 'required',
+      timeout: 120000,
+    }});
+    const r = assertion.response;
+    const body = {
+      forespor: fid,
+      clientDataJSON: b64u(r.clientDataJSON),
+      authenticatorData: b64u(r.authenticatorData),
+      signature: b64u(r.signature),
+    };
+    const resp = await fetch(`${API}/${encodeURIComponent(fid)}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Vis': vis }, body: JSON.stringify(body) });
+    st.textContent = resp.ok ? '✅ Godkjent. Nora utfører og svarer deg.' : '❌ Avvist: HTTP ' + resp.status;
+    document.getElementById('knapper').hidden = true;
+  } catch (e) { st.textContent = 'Feil: ' + e; }
+};
+document.getElementById('avvis').onclick = async () => {
+  await fetch(`${API}/${encodeURIComponent(fid)}`, { method: 'DELETE', headers: { 'X-Vis': vis } }).catch(()=>{});
+  document.getElementById('status').textContent = 'Avvist.';
+  document.getElementById('knapper').hidden = true;
+};
+if (fid && vis) last(); else document.getElementById('kort').textContent = 'Mangler id eller visningsnøkkel i lenka.';
+</script>
+</html>
